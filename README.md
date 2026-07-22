@@ -4,6 +4,12 @@ ClapRhythm is a free browser-based rhythm reading and clapping trainer.
 
 Users can create rhythms with notes, rests, triplets, dotted notes, ties, and custom time signatures. The app can play the rhythm with a metronome, record clapping through the microphone, and give timing feedback.
 
+## Live Website
+
+Try ClapRhythm here:
+
+https://claprhythm.netlify.app/
+
 ## Features
 
 - Create up to 12 measures
@@ -29,7 +35,3 @@ python3 -m http.server 8000
 Open this address in your browser:
 http://localhost:8000
 
-##FULL WEBSITE
-
-https://claprhythm.netlify.app/
-(Check it out!)
