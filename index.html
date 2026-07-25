@@ -133,6 +133,29 @@
       box-shadow: inset 0 0 0 1px var(--accent);
     }
 
+    .editor-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+
+    .editor-row input[type="text"] {
+      width: 190px;
+      border: 1px solid #cbd5e1;
+      border-radius: 9px;
+      padding: 8px 9px;
+    }
+
+    .selected-label {
+      color: #1d4ed8;
+      font-weight: 800;
+      margin-left: auto;
+    }
+
     .helper {
       color: var(--muted);
       font-size: 13px;
@@ -281,14 +304,20 @@
       </div>
       <div class="field">
         <label for="measures">Measures</label>
-        <input id="measures" type="number" min="1" max="12" value="4" />
+        <input id="measures" type="number" min="1" max="100" value="4" />
       </div>
       <div class="field wide">
         <label for="layout">Layout</label>
         <select id="layout">
           <option value="horizontal">Left / Right</option>
-          <option value="vertical">Up / Down — 4 measures per row</option>
+          <option value="vertical" selected>Up / Down — 4 measures per row</option>
         </select>
+      </div>
+      <div class="field">
+        <button id="addMeasure">+ Measure</button>
+      </div>
+      <div class="field">
+        <button id="removeMeasure">− Measure</button>
       </div>
       <div class="field">
         <button id="applyScore" class="primary">Apply</button>
@@ -304,8 +333,28 @@
     <div class="panel-body">
       <div id="palette" class="palette"></div>
       <div class="helper">
-        Click the score to append the selected item. Right-click a note or rest to remove it.
-        Notes crossing a bar line are tied automatically.
+        Free mode: click an empty beat to place the selected note or rest.
+        Auto-place mode: click anywhere on the score and the item goes after the last item;
+        if it does not fit, it starts at the beginning of the next measure.
+        Click an existing item to select it. Notes snap to a sixteenth-note grid.
+      </div>
+      <div class="editor-row">
+        <label style="display:flex; align-items:center; gap:6px; font-weight:800;">
+          <input id="autoPlace" type="checkbox" />
+          Auto-place after last item
+        </label>
+        <button id="replaceSelected">Replace selected</button>
+        <button id="deleteSelected" class="danger">Delete selected</button>
+        <button id="undoEdit">↶ Undo</button>
+        <button id="redoEdit">↷ Redo</button>
+        <input id="projectName" type="text" value="My Rhythm" aria-label="Project name" />
+        <button id="saveProject">Save</button>
+        <button id="loadProject">Load</button>
+        <button id="exportProject">Export file</button>
+        <label class="file-label">Import file
+          <input id="importProject" type="file" accept=".json,application/json" />
+        </label>
+        <span id="selectedLabel" class="selected-label">Nothing selected</span>
       </div>
     </div>
   </section>
@@ -387,7 +436,7 @@
   <section class="panel">
     <div class="panel-title">Timing feedback</div>
     <div class="panel-body">
-      <pre id="feedback">Choose your score settings, add notes or rests, then play or record.</pre>
+      <pre id="feedback">Click any beat to place notes, select items to replace/delete, and use Save to keep your rhythm.</pre>
     </div>
   </section>
 </div>
@@ -429,6 +478,10 @@ const STAFF_GAP = 18;
 let selectedName = "Quarter note";
 let items = [];
 let currentItemIndex = null;
+let selectedItemIndex = null;
+let undoStack = [];
+let redoStack = [];
+const MAX_HISTORY = 80;
 
 let audioContext = null;
 let customNoteBuffer = null;
@@ -507,8 +560,8 @@ function getSettings() {
     bpm: Math.max(30, Math.min(260, numberValue("bpm") || 80)),
     numerator: Math.max(1, Math.min(16, numberValue("numerator") || 4)),
     denominator: Number(value("denominator")),
-    measures: Math.max(1, Math.min(12, numberValue("measures") || 4)),
-    layout: value("layout")
+    measures: Math.max(1, Math.min(100, numberValue("measures") || 4)),
+    layout: value("layout") || "vertical"
   };
 }
 
@@ -523,7 +576,7 @@ function totalLength() {
   return measureLength() * getSettings().measures;
 }
 function currentLength() {
-  return items.reduce((sum, item) => sum + item.duration, 0);
+  return items.reduce((latest, item) => Math.max(latest, item.start + item.duration), 0);
 }
 function secondsPerQuarter() {
   const s = getSettings();
@@ -558,6 +611,121 @@ function canvasExtent() {
     width: LEFT_MARGIN + cols * MEASURE_WIDTH + 45,
     height: TOP_MARGIN + rowCount() * ROW_HEIGHT + 35
   };
+}
+
+function cloneItems(source = items) {
+  return source.map(item => ({...item}));
+}
+
+function pushHistory() {
+  undoStack.push(cloneItems());
+  if (undoStack.length > MAX_HISTORY) undoStack.shift();
+  redoStack = [];
+}
+
+function restoreItems(snapshot) {
+  items = cloneItems(snapshot).sort((a,b) => a.start - b.start);
+  selectedItemIndex = null;
+  currentItemIndex = null;
+  updateSelectedLabel();
+  resizeAndDraw();
+}
+
+function undoEdit() {
+  if (!undoStack.length) {
+    setStatus("Nothing to undo");
+    return;
+  }
+  redoStack.push(cloneItems());
+  restoreItems(undoStack.pop());
+  setStatus("Undid last edit");
+}
+
+function redoEdit() {
+  if (!redoStack.length) {
+    setStatus("Nothing to redo");
+    return;
+  }
+  undoStack.push(cloneItems());
+  restoreItems(redoStack.pop());
+  setStatus("Redid edit");
+}
+
+function updateSelectedLabel() {
+  const label = document.getElementById("selectedLabel");
+  if (selectedItemIndex === null || !items[selectedItemIndex]) {
+    label.textContent = "Nothing selected";
+  } else {
+    const item = items[selectedItemIndex];
+    label.textContent = `Selected: ${item.name} at beat ${(item.start + 1).toFixed(2)}`;
+  }
+}
+
+function snapQuarter(value) {
+  return Math.round(value / 0.25) * 0.25;
+}
+
+function positionFromCanvasPoint(x, y) {
+  const perRow = measuresPerRow();
+  const row = Math.floor((y - TOP_MARGIN + 35) / ROW_HEIGHT);
+  if (row < 0 || row >= rowCount()) return null;
+
+  const col = Math.floor((x - LEFT_MARGIN) / MEASURE_WIDTH);
+  if (col < 0 || col >= perRow) return null;
+
+  const bar = row * perRow + col;
+  if (bar < 0 || bar >= getSettings().measures) return null;
+
+  const withinPixels = x - (LEFT_MARGIN + col * MEASURE_WIDTH);
+  if (withinPixels < 0 || withinPixels > MEASURE_WIDTH) return null;
+
+  const withinQuarter = (withinPixels / MEASURE_WIDTH) * measureLength();
+  return Math.max(0, snapQuarter(bar * measureLength() + withinQuarter));
+}
+
+function findAutoPlacement(duration) {
+  if (!items.length) return 0;
+
+  const lastEnd = currentLength();
+  const mLength = measureLength();
+  const positionInMeasure = lastEnd % mLength;
+  const remaining = mLength - positionInMeasure;
+
+  // If the item fits, place it directly after the last item.
+  if (duration <= remaining + 1e-8 || positionInMeasure < 1e-8) {
+    return snapQuarter(lastEnd);
+  }
+
+  // Otherwise jump to the beginning of the next measure.
+  return snapQuarter(Math.ceil(lastEnd / mLength) * mLength);
+}
+
+function overlapsExisting(start, duration, ignoredIndex = null) {
+  const end = start + duration;
+  return items.some((item, index) => {
+    if (index === ignoredIndex) return false;
+    const itemEnd = item.start + item.duration;
+    return start < itemEnd - 1e-8 && end > item.start + 1e-8;
+  });
+}
+
+function findItemAtPoint(x, y) {
+  let best = {index:null, distance:Infinity};
+  items.forEach((item,index) => {
+    itemSegments(item).forEach(segment => {
+      const cx = segment.x1 + 8;
+      const cy = segment.y + 2 * STAFF_GAP;
+      const distance = Math.hypot(x - cx, y - cy);
+      if (distance < best.distance) best = {index, distance};
+    });
+  });
+  return best.distance < 38 ? best.index : null;
+}
+
+function sortItemsAndKeepSelection(selectedObject = null) {
+  items.sort((a,b) => a.start - b.start);
+  selectedItemIndex = selectedObject ? items.indexOf(selectedObject) : null;
+  updateSelectedLabel();
 }
 
 function buildPalette() {
@@ -626,7 +794,8 @@ function drawScore() {
 
   items.forEach((item, index) => {
     const active = playback.active && checked("showCurrent") && index === currentItemIndex;
-    drawItem(item, active);
+    const selected = index === selectedItemIndex;
+    drawItem(item, active, selected);
   });
 }
 
@@ -694,8 +863,8 @@ function visualStyle(item, duration) {
   return {style:options[0][1], dotted:options[0][2]};
 }
 
-function drawItem(item, active) {
-  const color = active ? "#dc2626" : "#111";
+function drawItem(item, active, selected = false) {
+  const color = active ? "#dc2626" : selected ? "#2563eb" : "#111";
   const segments = itemSegments(item);
 
   segments.forEach(segment => {
@@ -710,7 +879,7 @@ function drawItem(item, active) {
       drawRest(x, segment.y, visual.style, color);
     }
 
-    if (active) {
+    if (active || selected) {
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.strokeRect(
@@ -857,17 +1026,55 @@ function drawTie(first, second, color) {
 }
 
 canvas.addEventListener("click", event => {
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+
+  const hitIndex = findItemAtPoint(x, y);
+  if (hitIndex !== null) {
+    selectedItemIndex = hitIndex;
+    updateSelectedLabel();
+    drawScore();
+    setStatus(`Selected ${items[hitIndex].name}`);
+    return;
+  }
+
   const data = ITEM_TYPES[selectedName];
-  if (currentLength() + data.duration > totalLength() + 1e-8) {
-    showScoreMessage("Doesn’t fit in the remaining score", event.clientX, event.clientY);
+
+  let startPosition;
+  if (checked("autoPlace")) {
+    startPosition = findAutoPlacement(data.duration);
+  } else {
+    startPosition = positionFromCanvasPoint(x, y);
+    if (startPosition === null) return;
+  }
+
+  if (startPosition + data.duration > totalLength() + 1e-8) {
+    showScoreMessage(
+      checked("autoPlace")
+        ? "No room left — add another measure"
+        : "Doesn’t fit in the remaining score",
+      event.clientX,
+      event.clientY
+    );
     setStatus("Item rejected — not enough space");
     return;
   }
-  items.push({
+
+  if (overlapsExisting(startPosition, data.duration)) {
+    showScoreMessage("That space already contains a note or rest", event.clientX, event.clientY);
+    setStatus("Item rejected — overlap");
+    return;
+  }
+
+  pushHistory();
+  const newItem = {
     name:selectedName,
     ...data,
-    start:currentLength()
-  });
+    start:startPosition
+  };
+  items.push(newItem);
+  sortItemsAndKeepSelection(newItem);
   currentItemIndex = null;
   drawScore();
   setStatus(`Added ${selectedName}`);
@@ -879,26 +1086,82 @@ canvas.addEventListener("contextmenu", event => {
   const rect = canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
-  let best = {index:-1, distance:Infinity};
+  const hitIndex = findItemAtPoint(x, y);
 
-  items.forEach((item,index) => {
-    itemSegments(item).forEach(segment => {
-      const cx = segment.x1 + 8;
-      const cy = segment.y + 2*STAFF_GAP;
-      const d = Math.hypot(x-cx, y-cy);
-      if (d < best.distance) best = {index, distance:d};
-    });
-  });
-
-  if (best.index >= 0 && best.distance < 75) {
-    items.splice(best.index,1);
-    let cursor = 0;
-    items.forEach(item => {
-      item.start = cursor;
-      cursor += item.duration;
-    });
+  if (hitIndex !== null) {
+    pushHistory();
+    items.splice(hitIndex, 1);
+    selectedItemIndex = null;
+    updateSelectedLabel();
     drawScore();
     setStatus("Removed item");
+  }
+});
+
+document.getElementById("replaceSelected").addEventListener("click", () => {
+  if (selectedItemIndex === null || !items[selectedItemIndex]) {
+    setStatus("Select a note or rest first");
+    return;
+  }
+
+  const oldItem = items[selectedItemIndex];
+  const data = ITEM_TYPES[selectedName];
+
+  if (oldItem.start + data.duration > totalLength() + 1e-8 ||
+      overlapsExisting(oldItem.start, data.duration, selectedItemIndex)) {
+    setStatus("Replacement does not fit");
+    showScoreMessage("Replacement does not fit here", 320, 420);
+    return;
+  }
+
+  pushHistory();
+  const replacement = {
+    name:selectedName,
+    ...data,
+    start:oldItem.start
+  };
+  items[selectedItemIndex] = replacement;
+  sortItemsAndKeepSelection(replacement);
+  drawScore();
+  setStatus(`Replaced with ${selectedName}`);
+});
+
+document.getElementById("deleteSelected").addEventListener("click", () => {
+  if (selectedItemIndex === null || !items[selectedItemIndex]) {
+    setStatus("Select a note or rest first");
+    return;
+  }
+  pushHistory();
+  items.splice(selectedItemIndex, 1);
+  selectedItemIndex = null;
+  updateSelectedLabel();
+  drawScore();
+  setStatus("Deleted selected item");
+});
+
+document.getElementById("undoEdit").addEventListener("click", undoEdit);
+document.getElementById("redoEdit").addEventListener("click", redoEdit);
+
+document.getElementById("autoPlace").addEventListener("change", event => {
+  setStatus(
+    event.target.checked
+      ? "Auto-place on: items append automatically"
+      : "Free placement on: click an exact beat"
+  );
+});
+
+document.addEventListener("keydown", event => {
+  const target = event.target;
+  const typing = target && ["INPUT","TEXTAREA","SELECT"].includes(target.tagName);
+  if (typing) return;
+
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redoEdit();
+    else undoEdit();
+  } else if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    document.getElementById("deleteSelected").click();
   }
 });
 
@@ -909,8 +1172,9 @@ function applyScore() {
   document.getElementById("measures").value = s.measures;
 
   if (currentLength() > totalLength() + 1e-8) {
-    if (!confirm("The current rhythm is too long for the new score. Clear it?")) return;
-    items = [];
+    setStatus("Remove notes beyond the new final measure first");
+    document.getElementById("measures").value = Math.ceil(currentLength() / measureLength());
+    return;
   }
   exitPlayback();
   resizeAndDraw();
@@ -920,13 +1184,116 @@ function applyScore() {
 
 document.getElementById("applyScore").addEventListener("click", applyScore);
 document.getElementById("layout").addEventListener("change", resizeAndDraw);
+
+document.getElementById("addMeasure").addEventListener("click", () => {
+  const input = document.getElementById("measures");
+  input.value = Math.min(100, Number(input.value || 1) + 1);
+  applyScore();
+});
+
+document.getElementById("removeMeasure").addEventListener("click", () => {
+  const input = document.getElementById("measures");
+  const proposed = Math.max(1, Number(input.value || 1) - 1);
+  if (currentLength() > proposed * measureLength() + 1e-8) {
+    setStatus("Cannot remove: notes exist in the last measure");
+    return;
+  }
+  input.value = proposed;
+  applyScore();
+});
+
 document.getElementById("clearScore").addEventListener("click", () => {
   exitPlayback();
+  if (items.length) pushHistory();
   items = [];
+  selectedItemIndex = null;
   currentItemIndex = null;
+  updateSelectedLabel();
   resizeAndDraw();
   setFeedback("Score cleared.");
   setStatus("Ready");
+});
+
+function projectData() {
+  const s = getSettings();
+  return {
+    version: 2,
+    name: document.getElementById("projectName").value.trim() || "My Rhythm",
+    settings: {
+      bpm:s.bpm,
+      numerator:s.numerator,
+      denominator:s.denominator,
+      measures:s.measures,
+      layout:s.layout,
+      autoPlace:checked("autoPlace")
+    },
+    items:cloneItems()
+  };
+}
+
+function applyProjectData(data) {
+  if (!data || !data.settings || !Array.isArray(data.items)) {
+    throw new Error("This is not a valid ClapRhythm project.");
+  }
+
+  pushHistory();
+  document.getElementById("projectName").value = data.name || "My Rhythm";
+  document.getElementById("bpm").value = data.settings.bpm || 80;
+  document.getElementById("numerator").value = data.settings.numerator || 4;
+  document.getElementById("denominator").value = data.settings.denominator || 4;
+  document.getElementById("measures").value = Math.min(100, Math.max(1, data.settings.measures || 4));
+  document.getElementById("layout").value = data.settings.layout || "vertical";
+  document.getElementById("autoPlace").checked = Boolean(data.settings.autoPlace);
+  items = data.items.map(item => ({...item})).sort((a,b) => a.start - b.start);
+  selectedItemIndex = null;
+  updateSelectedLabel();
+  resizeAndDraw();
+  setStatus(`Loaded ${data.name || "project"}`);
+}
+
+document.getElementById("saveProject").addEventListener("click", () => {
+  const data = projectData();
+  localStorage.setItem("clapRhythmProject", JSON.stringify(data));
+  setStatus(`Saved “${data.name}” in this browser`);
+});
+
+document.getElementById("loadProject").addEventListener("click", () => {
+  const raw = localStorage.getItem("clapRhythmProject");
+  if (!raw) {
+    setStatus("No saved browser project found");
+    return;
+  }
+  try {
+    applyProjectData(JSON.parse(raw));
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.getElementById("exportProject").addEventListener("click", () => {
+  const data = projectData();
+  const safeName = data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "rhythm";
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeName}.claprhythm.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  setStatus("Project file exported");
+});
+
+document.getElementById("importProject").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    applyProjectData(data);
+  } catch (error) {
+    setStatus(`Import failed: ${error.message}`);
+  } finally {
+    event.target.value = "";
+  }
 });
 
 function ensureAudio() {
@@ -1341,6 +1708,7 @@ document.getElementById("checkTiming").addEventListener("click", checkTiming);
 
 window.addEventListener("resize", resizeAndDraw);
 buildPalette();
+updateSelectedLabel();
 resizeAndDraw();
 </script>
 </body>
